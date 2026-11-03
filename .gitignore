@@ -1,0 +1,35 @@
+# PerstaSync
+
+# --- Build outputs ---
+/perstasync
+/perstasync.exe
+cmd/perstasync/perstasync
+cmd/perstasync/perstasync.exe
+
+# --- Go build and test artifacts ---
+*.test
+*.out
+*.prof
+*.trace
+/coverage.txt
+/coverage.html
+/dist/
+/build/
+
+# --- Binary artifacts ---
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+
+# --- Generated data ---
+/results/raw/
+/results/tmp/
+/results/*.partial.json
+*.kv
+
+# --- Temporary state ---
+/sandbox/
+/fixtures/generated/
