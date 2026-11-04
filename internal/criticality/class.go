@@ -15,6 +15,14 @@ const (
 	C4 Class = "C4"
 )
 
+func (class Class) EligibleForDurabilityRates() bool {
+	return class == C1 || class == C2 || class == C3 || class == C4
+}
+
+func (class Class) IncludedInFlagDiagnostic() bool {
+	return class == C0 || class.EligibleForDurabilityRates()
+}
+
 func (class Class) Weight() (int, error) {
 	switch class {
 	case C0:

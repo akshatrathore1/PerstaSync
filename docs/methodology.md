@@ -1,7 +1,7 @@
 # Methodology and Current Scope
 
 PerstaSync is an engineering and empirical-measurement project studying durable file replacement
-in explicitly selected Go source trees. The current implementation is a bounded analyzer scaffold,
+in explicitly selected Go source trees. The current implementation is a bounded source analyzer,
 not a completed ecosystem study. There is no published corpus distribution or measured accuracy.
 
 ## Inputs and Loading
@@ -27,27 +27,68 @@ Loading and SSA construction do not execute the target program's initialization 
 CHA conservatively enumerates possible targets under its documented assumptions and can produce
 spurious edges. An edge does not prove that a sync executes on a particular path. Missing bodies,
 unsupported language forms, and implementation limits remain separate from graph conservatism.
-The current source classifier does not traverse this graph to implement inter-procedural analysis.
-No end-to-end soundness guarantee follows from using SSA or CHA.
+The source classifier follows statically identified callees with selected bodies; it does not
+turn possible CHA edges into evidence of executed synchronization. No end-to-end soundness
+guarantee follows from using SSA or CHA.
 
 ## Current Classification
 
-The current classifier recognizes direct `os.Rename` publication candidates and a narrow set of
-exact `os` file operations within a single SSA block. It tracks literal paths and direct handles,
-file synchronization, subsequent writes or mode changes, and observed unchecked sync/close errors.
-It is not a general path-sensitive classifier. Non-literal paths produce `undetermined`;
-unsupported calls and multi-block control flow can produce `L1-unknown`.
+The classifier recognizes direct `os.Rename` publication candidates and exact `os` file
+operations. Ordered call frames propagate handles, literal paths and returned values through
+statically identified callees in the selected packages. File synchronization and later mutations
+affect the same tracked object across calls; a directory sync must follow the publication it covers.
+Repeated observations of one publish coordinate merge conservatively: conflicting coverage is
+unresolved, and observed unchecked errors are retained. Candidates in unvisited bodies are still
+examined without caller evidence. The result is scoped to the selected source and observed call
+contexts, not every possible external caller.
 
-Writes through `os.OpenFile` retain unknown implicit synchronization coverage because the current
-classifier does not interpret its flags. Without an explicit file sync, these cases are
-`L1-unknown`, not definite L0. An explicit sync establishes file coverage, and a later required
-mode change invalidates it. This conservative handling does not implement positive flag coverage.
+Linux path tracking recognizes literals, `filepath.Dir`, `os.CreateTemp` parent identity and
+the tracked descriptor's `Name()`. Creating the temporary file in `filepath.Dir(destination)`
+can establish same-directory placement even when the destination is non-literal. A sync of
+that same parent handle after rename establishes directory coverage. Known cross-directory
+moves and unrelated or unsupported dynamic paths remain `undetermined`. Empty/default
+temporary-directory selection is not assumed to equal the destination parent. This tracks
+path expressions, not runtime directory stability, symlinks or concurrent namespace changes.
+`-disable-paths` withholds derived-parent and file-name proof while retaining literal boundaries,
+candidate coordinates and observed R3.
+
+It is not a general path-sensitive classifier. Unsupported calls, reachable multi-block control
+flow, recursion and call depth beyond the bounded limit produce unresolved coverage.
+Direct return chains preserve sync/close error evidence; comparing
+an error is not a general proof of propagation through arbitrary control flow.
+
+Interface/type-parameter dispatch and helpers without selected bodies remain unresolved even
+when their names suggest synchronization. Observed discarded interface sync/close errors set
+R3 without granting their effects any coverage. When both path and synchronization are unknown,
+the record retains both reasons and uses `undetermined` rather than a favorable interpretation.
+
+For Linux inputs, constant `os.OpenFile` flags are interpreted using the loaded target's flag
+definitions. A proven non-empty `O_SYNC` write covers the preceding file state. `O_DSYNC` writes
+need separate established metadata coverage, such as a preceding explicit sync with no later
+metadata change; otherwise that coverage stays `L1-unknown`. Empty creation and zero-length writes
+provide no barrier. Unknown write lengths preserve uncertainty when empty and non-empty outcomes
+differ. A later mode, ownership, or truncate operation invalidates coverage until covered again.
+Dynamic flags and unspecified or non-Linux platform semantics remain unresolved. The
+`-disable-open-flags` switch withholds implicit-write proof without changing explicit syncs or R3.
 
 The [level definitions](conformance-levels.md) describe the target classification contract.
-Synchronous-open coverage, callee effects, struct-held handles, captured heap cells, and general
-error propagation are not implemented capabilities. Do not use the scaffold's output to evaluate
-those cases or to infer application correctness. In particular, a false R3 flag is not proof that
-every error reaches the caller across unsupported code.
+Struct allocations have instance-specific field cells. Stores and loads propagate handles and
+paths across methods; aggregate copies copy field values without aliasing the field storage.
+Pointer-valued fields still refer to the same tracked object. Syncing another instance or field
+does not cover the published file, and reassignment does not retain the old handle's coverage.
+`-disable-struct-fields` withholds that evidence independently of call-frame tracking.
+
+Closures bind captured cells rather than copying their current contents. Reassignment is visible
+when the closure executes. Deferred calls save argument values at registration and run in reverse
+order at normal-return `RunDefers` points. A file sync after rename does not repair pre-publication
+coverage; a directory sync after rename can establish R2. Unreachable recovery blocks are not
+executed as normal paths. Goroutines and panic/recovery behavior are not modeled as ordered proof.
+`-disable-alloc-cells` withholds scalar-cell evidence without disabling struct fields.
+
+`-disable-interprocedural` withholds argument/result proof while retaining callee candidates and
+observed error handling. General error propagation, unsupported memory forms and external effects
+remain limitations. Do not infer application correctness from the bounded output; a false R3 flag
+is not proof that every error reaches the caller across unsupported code.
 
 The [criticality rules](criticality.md) have executable evidence-validation and ambiguity-ordering
 predicates, but automatic consequence discovery and reader adjudication are not implemented.
@@ -93,9 +134,13 @@ builds, vets, and runs the platform-appropriate tests. Windows does not run the 
 directory-sync round trip. Portable mock tests on Windows are not evidence of Windows R2 support.
 The workflow definition alone is not evidence that a hosted CI run has passed.
 
-Before a measured corpus run, all required capability fixtures must discriminate correct and
-incorrect sequences, the taxonomy must be frozen, and the input revisions and build context
-must be recorded. Accuracy needs a separately adjudicated gold set and paired control comparison.
+The required source and criticality boundary suite now passes locally on Windows and Linux,
+including independent switches for all five source capabilities and preservation of candidate
+coordinates and R3. The taxonomy was frozen on 2026-11-04. Hosted CI has not run. These checks
+establish the instrument's declared fixture behavior, not its accuracy on real repositories.
+
+Before a measured corpus run, the analyzer revision, input revisions and build context must be
+recorded. Accuracy needs a separately adjudicated gold set and paired control comparison.
 Separate labeling passes by the same annotator measure within-annotator repeatability, not
 independent-rater agreement. Each precision, recall, or subgroup estimate needs its actual
 denominator and interval; a total gold-set minimum does not guarantee every metric's precision.

@@ -1,3 +1,5 @@
+// Package direct encodes NoSync=L0, FileOnly=L1, FileAndDirectory=L2,
+// MetadataAfterSync=L0, and both path-boundary functions=undetermined.
 package direct
 
 import "os"

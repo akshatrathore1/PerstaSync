@@ -34,6 +34,11 @@ func TestLevel(t *testing.T) {
 			}
 		})
 	}
+	for _, level := range []Level{L0, L1, L2, L1Unknown, Undetermined, Level("invalid")} {
+		if level.DefiniteNonconformance() != (level == L0 || level == L1) {
+			t.Fatalf("%s has incorrect definite-flag membership", level)
+		}
+	}
 	if Level("").Valid() {
 		t.Fatal("empty level is valid")
 	}

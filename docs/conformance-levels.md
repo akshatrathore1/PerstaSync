@@ -139,6 +139,12 @@ This is `undetermined`. A known move from one directory to another is also outsi
 protocol and records that reason. Atomic [rename restrictions](https://man7.org/linux/man-pages/man2/rename.2.html)
 and cross-filesystem errors must not be replaced with an assumed copy-based equivalent.
 
+A non-literal destination does not necessarily make the relationship unknown. A tracked
+`os.CreateTemp(filepath.Dir(destination), pattern)` and the resulting file's `Name()` establish
+that parent relationship under successful-operation semantics. An unrelated dynamic path or
+default temporary directory supplies no such evidence. Runtime directory stability remains
+an assumption of the studied protocol, not a property established by string expressions.
+
 ## Synchronous Writes
 
 On a verified Linux context, a non-empty `O_SYNC` write may establish file coverage when

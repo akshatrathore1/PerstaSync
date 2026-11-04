@@ -20,6 +20,11 @@ func run(ctx context.Context, arguments []string, output, diagnostics io.Writer)
 	root := flags.String("root", "", "Source tree root")
 	goos := flags.String("goos", "", "Target operating system")
 	goarch := flags.String("goarch", "", "Target architecture")
+	disableOpenFlags := flags.Bool("disable-open-flags", false, "Disable synchronous-write flag coverage")
+	disableInterprocedural := flags.Bool("disable-interprocedural", false, "Disable callee argument and result tracking")
+	disableStructFields := flags.Bool("disable-struct-fields", false, "Disable struct-field handle and path tracking")
+	disableAllocCells := flags.Bool("disable-alloc-cells", false, "Disable captured scalar-cell tracking")
+	disablePaths := flags.Bool("disable-paths", false, "Disable derived parent and file-name path tracking")
 	if err := flags.Parse(arguments); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -39,7 +44,13 @@ func run(ctx context.Context, arguments []string, output, diagnostics io.Writer)
 	if err != nil {
 		return err
 	}
-	sites, err := protocol.Analyze(program.SSA, program.Initial, directory)
+	sites, err := protocol.AnalyzeWithOptions(program.SSA, program.Initial, directory, protocol.Options{
+		GOOS: program.Config.GOOS, DisableOpenFlags: *disableOpenFlags,
+		DisableInterprocedural: *disableInterprocedural,
+		DisableStructFields:    *disableStructFields,
+		DisableAllocCells:      *disableAllocCells,
+		DisablePaths:           *disablePaths,
+	})
 	if err != nil {
 		return err
 	}

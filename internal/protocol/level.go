@@ -21,6 +21,10 @@ func (level Level) Valid() bool {
 	}
 }
 
+func (level Level) DefiniteNonconformance() bool {
+	return level == L0 || level == L1
+}
+
 type Coverage uint8
 
 const (

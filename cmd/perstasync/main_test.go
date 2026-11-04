@@ -63,6 +63,133 @@ func TestCLI(t *testing.T) {
 	}
 }
 
+func TestCLIOpenFlags(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := []string{"-root", root, "-goos", "linux", "-goarch", "amd64"}
+	var first, repeated, disabled, diagnostics bytes.Buffer
+	for _, output := range []*bytes.Buffer{&first, &repeated} {
+		if err := run(context.Background(), append(arguments, "./testdata/fixtures/openflags"), output, &diagnostics); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !bytes.Equal(first.Bytes(), repeated.Bytes()) {
+		t.Fatal("synchronous-write CLI output differs across repeated loads")
+	}
+	if err := run(context.Background(), append(arguments, "-disable-open-flags", "./testdata/fixtures/openflags"), &disabled, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	var enabledSites, disabledSites []protocol.Site
+	if err := json.Unmarshal(first.Bytes(), &enabledSites); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(disabled.Bytes(), &disabledSites); err != nil {
+		t.Fatal(err)
+	}
+	if len(enabledSites) == 0 || len(enabledSites) != len(disabledSites) {
+		t.Fatalf("ablation changed candidate accounting: %d vs %d", len(enabledSites), len(disabledSites))
+	}
+	if enabledSites[0].Level != protocol.L1 || disabledSites[0].Level != protocol.L1Unknown || !enabledSites[0].R3 || !disabledSites[0].R3 {
+		t.Fatalf("CLI flag coverage: enabled=%+v disabled=%+v", enabledSites[0], disabledSites[0])
+	}
+}
+
+func TestCLITracking(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		fixture  string
+		flag     string
+		disabled protocol.Level
+	}{
+		{"callees", "-disable-interprocedural", protocol.L1Unknown},
+		{"structs", "-disable-struct-fields", protocol.Undetermined},
+		{"captures", "-disable-alloc-cells", protocol.L1Unknown},
+		{"paths", "-disable-paths", protocol.Undetermined},
+	} {
+		t.Run(test.fixture, func(t *testing.T) {
+			for _, disabled := range []bool{false, true} {
+				arguments := []string{"-root", root, "-goos", "linux", "-goarch", "amd64"}
+				expected := protocol.L2
+				if disabled {
+					arguments = append(arguments, test.flag)
+					expected = test.disabled
+				}
+				var output, diagnostics bytes.Buffer
+				if err := run(context.Background(), append(arguments, "./testdata/fixtures/"+test.fixture), &output, &diagnostics); err != nil {
+					t.Fatal(err)
+				}
+				var sites []protocol.Site
+				if err := json.Unmarshal(output.Bytes(), &sites); err != nil {
+					t.Fatal(err)
+				}
+				if len(sites) == 0 || sites[0].Level != expected || !sites[0].R3 {
+					t.Fatalf("disabled=%t: expected %s with R3, got %+v", disabled, expected, sites)
+				}
+			}
+		})
+	}
+}
+
+func TestCLICapabilityDeterminism(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	patterns := []string{
+		"./testdata/fixtures/direct", "./testdata/fixtures/openflags", "./testdata/fixtures/callees",
+		"./testdata/fixtures/structs", "./testdata/fixtures/captures", "./testdata/fixtures/paths",
+	}
+	reversed := make([]string, len(patterns))
+	for index, pattern := range patterns {
+		reversed[len(patterns)-1-index] = pattern
+	}
+	switches := []string{
+		"-disable-open-flags", "-disable-interprocedural", "-disable-struct-fields",
+		"-disable-alloc-cells", "-disable-paths",
+	}
+	configurations := [][]string{nil}
+	for _, disabled := range switches {
+		configurations = append(configurations, []string{disabled})
+	}
+	configurations = append(configurations, switches)
+	var baseline []protocol.Site
+	for _, configuration := range configurations {
+		arguments := []string{"-root", root, "-goos", "linux", "-goarch", "amd64"}
+		arguments = append(arguments, configuration...)
+		var first, second, diagnostics bytes.Buffer
+		if err := run(context.Background(), append(append([]string(nil), arguments...), patterns...), &first, &diagnostics); err != nil {
+			t.Fatal(err)
+		}
+		if err := run(context.Background(), append(append([]string(nil), arguments...), reversed...), &second, &diagnostics); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(first.Bytes(), second.Bytes()) {
+			t.Fatalf("configuration %v changed output with package order", configuration)
+		}
+		var sites []protocol.Site
+		if err := json.Unmarshal(first.Bytes(), &sites); err != nil {
+			t.Fatal(err)
+		}
+		if baseline == nil {
+			baseline = sites
+		}
+		if len(sites) == 0 || len(sites) != len(baseline) {
+			t.Fatalf("configuration %v changed candidate accounting: %d vs %d", configuration, len(sites), len(baseline))
+		}
+		for index, site := range sites {
+			original := baseline[index]
+			if site.File != original.File || site.Offset != original.Offset || site.R3 != original.R3 {
+				t.Errorf("configuration %v changed coordinate/R3 at %d: %+v vs %+v", configuration, index, site, original)
+			}
+		}
+	}
+}
+
 func TestPackageBoundaries(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
