@@ -45,9 +45,8 @@ func (manifest Manifest) Validate() error {
 	}
 	seen := make(map[string]bool)
 	for _, repository := range manifest.Repositories {
-		location, err := url.Parse(repository.URL)
-		if err != nil || location.Scheme != "https" || location.Hostname() == "" || location.Path == "" || location.User != nil || location.RawQuery != "" || location.Fragment != "" {
-			return fmt.Errorf("repository requires an HTTPS URL without credentials, query, or fragment")
+		if err := validateRepositoryURL(repository.URL); err != nil {
+			return err
 		}
 		commit, err := hex.DecodeString(repository.Commit)
 		if err != nil || (len(commit) != 20 && len(commit) != 32) {
@@ -63,6 +62,14 @@ func (manifest Manifest) Validate() error {
 			return fmt.Errorf("repository URL occurs more than once")
 		}
 		seen[repository.URL] = true
+	}
+	return nil
+}
+
+func validateRepositoryURL(raw string) error {
+	location, err := url.Parse(raw)
+	if err != nil || location.Scheme != "https" || location.Hostname() == "" || location.Path == "" || location.User != nil || location.RawQuery != "" || location.Fragment != "" {
+		return fmt.Errorf("repository requires an HTTPS URL without credentials, query, or fragment")
 	}
 	return nil
 }

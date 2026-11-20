@@ -13,6 +13,14 @@ source analysis; the loader disables proxy acquisition and automatic toolchain s
 This is not an operating-system network sandbox: the source tree, local module replacements,
 and Go configuration must be controlled inputs.
 
+The same CLI provides `pin` and `materialize` acquisition subcommands. Both require an explicit
+sandbox and an OS path list of protected source roots. `pin` records the repository URL, symbolic
+default branch, full commit, observation time and Git version. The sandbox must already exist.
+`materialize` accepts exactly one
+strict pin JSON document and emits its pin plus the tracked non-vendor Go-file count; it does not
+emit the local checkout path. Failed requests emit no JSON. These commands acquire source only;
+they do not classify it or publish a result.
+
 [`packages.Load`](https://pkg.go.dev/golang.org/x/tools@v0.52.0/go/packages#Load) loads the
 explicit initial selection using `LoadSyntax`. The loader rejects package errors rather than
 silently returning a partially classified tree. Its current failure policy aborts the request;
@@ -115,6 +123,20 @@ The corpus-bookkeeping package validates a manifest's HTTPS URLs, full commit ID
 counts, and selection criteria. Its digest is stable under repository-list reordering and changes
 when recorded pins or selection evidence change. This does not prove that a commit exists, verify
 file counts, acquire a repository, establish selection representativeness, or run a corpus.
+
+Materialization destination validation is side-effect-free. It requires a separate sandbox and
+explicit protected source roots, rejects overlapping trees, Git ancestors, symlink components and
+pre-existing destinations, and uses a lowercase SHA-256 directory identity. This currently validates
+paths only. The internal Git runner uses argument arrays, empty sandbox-owned system/global
+configuration, disabled prompts/hooks/LFS filters and explicit transport controls. Local tests
+verify isolation from poisoned ambient Git variables and configuration. Full-pin checkout
+verification now checks advertised default-branch identity against the recorded commit before
+checkout. Tracked root `go.mod` and non-vendor Go-file counts determine mechanical eligibility;
+tracked module/Go sources must be regular files without symlink traversal. Tags and submodules
+are not implicitly acquired. Failed new destinations are removed, while existing destinations
+are rejected rather than reused. Local integration tests cover moved pins, ambient checkout
+effects and cleanup. Go dependency materialization is not yet implemented;
+no repository from the corpus frame has been accessed.
 
 ## Reference Writer and Verification
 

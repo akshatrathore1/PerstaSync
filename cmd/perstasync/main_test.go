@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"go/ast"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/tools/go/packages"
 
+	"perstasync/internal/corpus"
 	"perstasync/internal/protocol"
 )
 
@@ -190,6 +193,67 @@ func TestCLICapabilityDeterminism(t *testing.T) {
 	}
 }
 
+func TestCLIAcquisitionWiring(t *testing.T) {
+	root := t.TempDir()
+	sandbox := filepath.Join(root, "sandbox")
+	protected := []string{filepath.Join(root, "source-one"), filepath.Join(root, "source-two")}
+	pin := corpus.Pin{
+		URL: "https://example.org/repository.git", DefaultBranch: "main", Commit: strings.Repeat("a", 40),
+		ObservedUTC: time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC).Format(time.RFC3339), GitVersion: "git version test",
+	}
+	originalObserve, originalMaterialize := observeCorpusPin, materializeCorpusPin
+	t.Cleanup(func() { observeCorpusPin, materializeCorpusPin = originalObserve, originalMaterialize })
+	observeCorpusPin = func(_ context.Context, config corpus.AcquisitionConfig, source string) (corpus.Pin, error) {
+		if config.Sandbox != sandbox || !reflect.DeepEqual(config.Protected, protected) || source != pin.URL {
+			t.Fatalf("pin wiring: config=%+v source=%q", config, source)
+		}
+		return pin, nil
+	}
+	var output, diagnostics bytes.Buffer
+	protectedList := strings.Join(protected, string(os.PathListSeparator))
+	if err := run(context.Background(), []string{"pin", "-sandbox", sandbox, "-protected", protectedList, pin.URL}, &output, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	var observed corpus.Pin
+	if err := json.Unmarshal(output.Bytes(), &observed); err != nil || observed != pin {
+		t.Fatalf("pin output: %+v err=%v", observed, err)
+	}
+	pinFile := filepath.Join(root, "pin.json")
+	data, err := json.Marshal(pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pinFile, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	materializeCorpusPin = func(_ context.Context, config corpus.AcquisitionConfig, input corpus.Pin) (corpus.Checkout, error) {
+		if config.Sandbox != sandbox || !reflect.DeepEqual(config.Protected, protected) || input != pin {
+			t.Fatalf("materialize wiring: config=%+v pin=%+v", config, input)
+		}
+		return corpus.Checkout{Pin: input, GoFileCount: 7, Directory: filepath.Join(root, "sensitive-checkout")}, nil
+	}
+	output.Reset()
+	if err := run(context.Background(), []string{"materialize", "-sandbox", sandbox, "-protected", protectedList, "-pin", pinFile}, &output, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), root) {
+		t.Fatalf("materialization output disclosed a local path: %s", output.String())
+	}
+	var checkout corpus.Checkout
+	if err := json.Unmarshal(output.Bytes(), &checkout); err != nil || checkout.Pin != pin || checkout.GoFileCount != 7 || checkout.Directory != "" {
+		t.Fatalf("materialize output: %+v err=%v", checkout, err)
+	}
+	for _, invalid := range [][]string{
+		{"pin", "-sandbox", sandbox, pin.URL},
+		{"materialize", "-sandbox", sandbox, "-protected", protectedList},
+	} {
+		output.Reset()
+		if err := run(context.Background(), invalid, &output, &diagnostics); err == nil || output.Len() != 0 {
+			t.Fatalf("invalid acquisition emitted output=%q err=%v", output.String(), err)
+		}
+	}
+}
+
 func TestPackageBoundaries(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -203,8 +267,9 @@ func TestPackageBoundaries(t *testing.T) {
 		t.Fatal("architecture check loaded no packages")
 	}
 	commandImports := map[string]bool{
-		"context": true, "errors": true, "flag": true, "fmt": true, "io": true, "os": true, "path/filepath": true,
-		"perstasync/internal/load": true, "perstasync/internal/protocol": true, "perstasync/internal/report": true,
+		"bytes": true, "context": true, "encoding/json": true, "errors": true, "flag": true, "fmt": true, "io": true, "os": true, "path/filepath": true,
+		"perstasync/internal/corpus": true,
+		"perstasync/internal/load":   true, "perstasync/internal/protocol": true, "perstasync/internal/report": true,
 	}
 	for _, pkg := range loaded {
 		for _, diagnostic := range pkg.Errors {
@@ -230,7 +295,7 @@ func TestPackageBoundaries(t *testing.T) {
 		for _, file := range pkg.Syntax {
 			for _, declaration := range file.Decls {
 				function, ok := declaration.(*ast.FuncDecl)
-				if ok && (function.Recv != nil || (function.Name.Name != "main" && function.Name.Name != "run")) {
+				if ok && (function.Recv != nil || (function.Name.Name != "main" && function.Name.Name != "run" && function.Name.Name != "runClassify" && function.Name.Name != "runPin" && function.Name.Name != "runMaterialize")) {
 					t.Errorf("command package declares non-wiring function %s", function.Name.Name)
 				}
 				if !ok {
