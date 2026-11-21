@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -16,11 +17,14 @@ import (
 )
 
 type Config struct {
-	Directory  string
-	Patterns   []string
-	GOOS       string
-	GOARCH     string
-	BuildFlags []string
+	Directory   string
+	Patterns    []string
+	GOOS        string
+	GOARCH      string
+	BuildFlags  []string
+	ModuleCache string
+	BuildCache  string
+	ModuleFile  string
 }
 
 type Program struct {
@@ -35,9 +39,19 @@ func Open(ctx context.Context, config Config) (*Program, error) {
 	if config.Directory == "" || len(config.Patterns) == 0 || config.GOOS == "" || config.GOARCH == "" {
 		return nil, errors.New("loading requires a directory, explicit package patterns, GOOS, and GOARCH")
 	}
+	explicitCaches := config.ModuleCache != "" || config.BuildCache != ""
+	if explicitCaches && (!filepath.IsAbs(config.ModuleCache) || !filepath.IsAbs(config.BuildCache)) {
+		return nil, errors.New("offline loading requires both absolute module and build cache paths")
+	}
+	if config.ModuleFile != "" && (!explicitCaches || !filepath.IsAbs(config.ModuleFile)) {
+		return nil, errors.New("alternate module loading requires explicit caches and an absolute module file")
+	}
 	environment := make([]string, 0, len(os.Environ())+4)
 	for _, variable := range os.Environ() {
 		name, _, _ := strings.Cut(variable, "=")
+		if explicitCaches && strings.HasPrefix(strings.ToUpper(name), "GO") {
+			continue
+		}
 		switch strings.ToUpper(name) {
 		case "GOOS", "GOARCH", "GOPROXY", "GOTOOLCHAIN":
 		default:
@@ -45,6 +59,16 @@ func Open(ctx context.Context, config Config) (*Program, error) {
 		}
 	}
 	environment = append(environment, "GOOS="+config.GOOS, "GOARCH="+config.GOARCH, "GOPROXY=off", "GOTOOLCHAIN=local")
+	if explicitCaches {
+		environment = append(environment,
+			"GOMODCACHE="+config.ModuleCache, "GOCACHE="+config.BuildCache,
+			"GOENV=off", "GOWORK=off", "GOSUMDB=off", "GOPRIVATE=", "GONOPROXY=", "GONOSUMDB=", "GOFLAGS=", "GOTELEMETRY=off",
+		)
+		config.BuildFlags = append(append([]string(nil), config.BuildFlags...), "-mod=readonly")
+		if config.ModuleFile != "" {
+			config.BuildFlags = append(config.BuildFlags, "-modfile="+config.ModuleFile)
+		}
+	}
 	loaded, err := packages.Load(&packages.Config{
 		Context:    ctx,
 		Dir:        config.Directory,

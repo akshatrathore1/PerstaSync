@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"go/ast"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -254,6 +255,139 @@ func TestCLIAcquisitionWiring(t *testing.T) {
 	}
 }
 
+func TestCLIOfflineCaches(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.27.1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	source := "package fixture\n\nimport \"os\"\n\nfunc Publish() error { return os.Rename(\"state.tmp\", \"state\") }\n"
+	if err := os.WriteFile(filepath.Join(root, "fixture.go"), []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	moduleCache, buildCache := t.TempDir(), t.TempDir()
+	ambientModule, ambientBuild := t.TempDir(), t.TempDir()
+	t.Setenv("GOMODCACHE", ambientModule)
+	t.Setenv("GOCACHE", ambientBuild)
+	base := []string{"-root", root, "-goos", runtime.GOOS, "-goarch", runtime.GOARCH}
+	var output, diagnostics bytes.Buffer
+	for _, option := range []string{"-module-cache", "-build-cache"} {
+		arguments := append(append([]string(nil), base...), option, moduleCache, "./...")
+		if err := run(context.Background(), arguments, &output, &diagnostics); err == nil || !strings.Contains(err.Error(), "both absolute module and build cache") || output.Len() != 0 {
+			t.Fatalf("partial cache context: output=%q err=%v", output.String(), err)
+		}
+	}
+	arguments := append(base, "-module-cache", moduleCache, "-build-cache", buildCache, "./...")
+	if err := run(context.Background(), arguments, &output, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	var sites []protocol.Site
+	if err := json.Unmarshal(output.Bytes(), &sites); err != nil || len(sites) != 1 || sites[0].File != "fixture.go" || sites[0].Level != protocol.L1Unknown {
+		t.Fatalf("offline CLI output: %+v err=%v", sites, err)
+	}
+	entries, err := os.ReadDir(buildCache)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("explicit build cache was not used: %v", err)
+	}
+	for _, cache := range []string{ambientModule, ambientBuild} {
+		entries, err := os.ReadDir(cache)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("ambient cache was changed: %v err=%v", entries, err)
+		}
+	}
+}
+
+func TestCLIPrefetchWiring(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	protected := []string{t.TempDir(), t.TempDir()}
+	prepared := corpus.Dependencies{
+		ID: strings.Repeat("a", 64), PreparedUTC: "2026-11-21T00:00:00Z", GoVersion: "go version test",
+		GOOS: "linux", GOARCH: "amd64", Proxy: "https://proxy.example", SumDB: "sum.golang.org",
+		SourceModHash: strings.Repeat("b", 64), SourceSumHash: strings.Repeat("c", 64), SourceSumPresent: true,
+		ModuleHash: strings.Repeat("d", 64), SumHash: strings.Repeat("e", 64),
+		ModuleFile: filepath.Join(root, "sensitive.mod"), ModuleCache: filepath.Join(root, "modules"), BuildCache: filepath.Join(root, "build"),
+	}
+	original := prefetchCorpusDependencies
+	t.Cleanup(func() { prefetchCorpusDependencies = original })
+	prefetchCorpusDependencies = func(_ context.Context, config corpus.PrefetchConfig) (corpus.Dependencies, error) {
+		if config.Directory != source || config.Sandbox != root || !reflect.DeepEqual(config.Protected, protected) || config.GOOS != "linux" || config.GOARCH != "amd64" || config.Proxy != "https://proxy.example" || config.SumDB != "sum.golang.org" {
+			t.Fatalf("prefetch wiring: %+v", config)
+		}
+		return prepared, nil
+	}
+	protectedList := strings.Join(protected, string(os.PathListSeparator))
+	arguments := []string{"prefetch", "-root", source, "-sandbox", root, "-protected", protectedList, "-goos", "linux", "-goarch", "amd64", "-proxy", "https://proxy.example", "-sumdb", "sum.golang.org"}
+	var output, diagnostics bytes.Buffer
+	if err := run(context.Background(), arguments, &output, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	var decoded corpus.Dependencies
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil || decoded.ID != prepared.ID || decoded.ModuleFile != "" || decoded.ModuleCache != "" || decoded.BuildCache != "" {
+		t.Fatalf("prefetch output: %+v err=%v", decoded, err)
+	}
+	output.Reset()
+	if err := run(context.Background(), []string{"prefetch", "-root", source}, &output, &diagnostics); err == nil || output.Len() != 0 {
+		t.Fatalf("invalid prefetch emitted output=%q err=%v", output.String(), err)
+	}
+}
+
+func TestCLIDependencyContext(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for filename, content := range map[string]string{
+		filepath.Join(source, "go.mod"):     "module fixture\n\ngo 1.27.1\n",
+		filepath.Join(source, "fixture.go"): "package fixture\nimport \"os\"\nfunc Publish() error { return os.Rename(\"state.tmp\", \"state\") }\n",
+	} {
+		if err := os.WriteFile(filename, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proxy := filepath.Join(root, "proxy")
+	if err := os.Mkdir(proxy, 0700); err != nil {
+		t.Fatal(err)
+	}
+	proxyPath := filepath.ToSlash(proxy)
+	if filepath.VolumeName(proxy) != "" {
+		proxyPath = "/" + proxyPath
+	}
+	prepared, err := corpus.Prefetch(context.Background(), corpus.PrefetchConfig{
+		Directory: source, Sandbox: root, Protected: []string{t.TempDir()}, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
+		Proxy: (&url.URL{Scheme: "file", Path: proxyPath}).String(), SumDB: "off",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextFile := filepath.Join(root, "dependencies.json")
+	if err := os.WriteFile(contextFile, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	protected := strings.Join([]string{t.TempDir(), t.TempDir()}, string(os.PathListSeparator))
+	arguments := []string{"-root", source, "-goos", runtime.GOOS, "-goarch", runtime.GOARCH, "-dependency-context", contextFile, "-sandbox", root, "-protected", protected, "./..."}
+	var output, diagnostics bytes.Buffer
+	if err := run(context.Background(), arguments, &output, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	var sites []protocol.Site
+	if err := json.Unmarshal(output.Bytes(), &sites); err != nil || len(sites) != 1 {
+		t.Fatalf("context classification: %+v err=%v", sites, err)
+	}
+	output.Reset()
+	arguments[3] = "plan9"
+	if err := run(context.Background(), arguments, &output, &diagnostics); err == nil || output.Len() != 0 {
+		t.Fatalf("mismatched context emitted output=%q err=%v", output.String(), err)
+	}
+}
+
 func TestPackageBoundaries(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -295,7 +429,7 @@ func TestPackageBoundaries(t *testing.T) {
 		for _, file := range pkg.Syntax {
 			for _, declaration := range file.Decls {
 				function, ok := declaration.(*ast.FuncDecl)
-				if ok && (function.Recv != nil || (function.Name.Name != "main" && function.Name.Name != "run" && function.Name.Name != "runClassify" && function.Name.Name != "runPin" && function.Name.Name != "runMaterialize")) {
+				if ok && (function.Recv != nil || (function.Name.Name != "main" && function.Name.Name != "run" && function.Name.Name != "runClassify" && function.Name.Name != "runPin" && function.Name.Name != "runMaterialize" && function.Name.Name != "runPrefetch")) {
 					t.Errorf("command package declares non-wiring function %s", function.Name.Name)
 				}
 				if !ok {

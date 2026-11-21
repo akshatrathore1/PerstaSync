@@ -13,6 +13,20 @@ source analysis; the loader disables proxy acquisition and automatic toolchain s
 This is not an operating-system network sandbox: the source tree, local module replacements,
 and Go configuration must be controlled inputs.
 
+Classification accepts paired absolute `-module-cache` and `-build-cache` paths. In that mode,
+the loader overrides ambient Go cache/configuration values, disables workspace discovery,
+checksum-service access and telemetry, and uses read-only module loading. Missing cached
+dependencies fail explicitly. Without the pair, cache locations retain the existing environment
+defaults. Cache configuration is distinct from dependency prefetch and does not acquire modules.
+
+`prefetch` requires a materialized root within the sandbox, protected source roots, target platform,
+a single module proxy and explicit checksum policy. It prepares alternate module/checksum inputs
+without editing the checkout and emits their context metadata without local absolute paths.
+Classification may use `-dependency-context` with the same sandbox/protection configuration instead
+of direct cache flags. The corpus package strictly decodes that context, reconstructs local paths,
+verifies identity and source/prepared hashes, and checks the current Go version before loading.
+The requested platform must match; invalid contexts produce no classification document.
+
 The same CLI provides `pin` and `materialize` acquisition subcommands. Both require an explicit
 sandbox and an OS path list of protected source roots. `pin` records the repository URL, symbolic
 default branch, full commit, observation time and Git version. The sandbox must already exist.
@@ -135,8 +149,17 @@ checkout. Tracked root `go.mod` and non-vendor Go-file counts determine mechanic
 tracked module/Go sources must be regular files without symlink traversal. Tags and submodules
 are not implicitly acquired. Failed new destinations are removed, while existing destinations
 are rejected rather than reused. Local integration tests cover moved pins, ambient checkout
-effects and cleanup. Go dependency materialization is not yet implemented;
-no repository from the corpus frame has been accessed.
+effects and cleanup. No repository from the corpus frame has been accessed.
+
+The internal dependency prefetch API uses alternate `.mod`/`.sum` files under the validated
+sandbox, preserving the checkout's original inputs. It allows one explicit module proxy and
+checksum policy, disables ambient authentication and transport overrides, and confines local
+module replacements to the checkout. Module/build caches remain sandbox-owned; failed new
+contexts are cleaned using Go's scoped module-cache removal. Local proxy metadata uses relative
+paths, and context identity distinguishes absent from empty source checksum files. Native/Linux
+fixtures verify subsequent offline loading, source preservation, replacements and failure cleanup.
+The CLI uses this validated context for offline loading. These are synthetic implementation
+checks, not a corpus acquisition, accuracy evaluation or crash-confirmation result.
 
 ## Reference Writer and Verification
 
