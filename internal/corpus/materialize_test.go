@@ -413,6 +413,36 @@ func TestPinnedCheckoutRejectsExternalSymlink(t *testing.T) {
 	}
 }
 
+func TestPinnedCheckoutLongPath(t *testing.T) {
+	runner, source, _ := localGitSource(t, map[string]string{"go.mod": "module fixture\n", "file.go": "package fixture\n"})
+	blob, err := runner.run(context.Background(), source, "hash-object", "-w", "--", "file.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	component := strings.Repeat("long-path-", 6)
+	longName := strings.Join([]string{component, component, component, component, "long.go"}, "/")
+	if len(filepath.Join(source, filepath.FromSlash(longName))) <= 260 {
+		t.Fatal("long-path fixture does not exceed the Windows legacy limit")
+	}
+	cacheInfo := "100644," + strings.TrimSpace(string(blob)) + "," + longName
+	if _, err := runner.run(context.Background(), source, "update-index", "--add", "--cacheinfo", cacheInfo); err != nil {
+		t.Fatal(err)
+	}
+	commitLocalSource(t, runner, source)
+	pin, err := observePin(context.Background(), runner, filepath.Dir(source), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout, err := materializePin(context.Background(), runner, t.TempDir(), []string{source}, pin)
+	if err != nil || checkout.GoFileCount != 2 {
+		t.Fatalf("long-path checkout: %+v err=%v", checkout, err)
+	}
+	contents, err := os.ReadFile(filepath.Join(checkout.Directory, filepath.FromSlash(longName)))
+	if err != nil || string(contents) != "package fixture\n" {
+		t.Fatalf("long-path contents: %q err=%v", contents, err)
+	}
+}
+
 func TestReadPin(t *testing.T) {
 	pin := Pin{
 		URL: "https://example.org/repository.git", DefaultBranch: "main", Commit: strings.Repeat("a", 40),

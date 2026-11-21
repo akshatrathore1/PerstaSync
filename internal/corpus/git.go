@@ -49,6 +49,7 @@ func (runner *gitRunner) command(ctx context.Context, directory string, argument
 		"-c", "init.templateDir=" + runner.hooks,
 		"-c", "core.attributesFile=" + runner.config,
 		"-c", "core.autocrlf=false",
+		"-c", "core.longpaths=true",
 		"-c", "core.symlinks=true",
 		"-c", "core.fsmonitor=false",
 		"-c", "credential.helper=",
