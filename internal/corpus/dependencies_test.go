@@ -82,6 +82,138 @@ func TestPrefetchMetadataAndCollisions(t *testing.T) {
 	}
 }
 
+func TestPrefetchResume(t *testing.T) {
+	config := prefetchFixture(t)
+	config.Resume = true
+	if _, err := Prefetch(context.Background(), config); err == nil {
+		t.Fatal("resumed a missing context")
+	}
+	config.Resume = false
+	prepared, err := Prefetch(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(prepared.ModuleCache, "retained-cache")
+	if err := os.WriteFile(sentinel, []byte("retained"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sumFile := strings.TrimSuffix(prepared.ModuleFile, ".mod") + ".sum"
+	if err := os.WriteFile(sumFile, []byte("incomplete checksum input\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config.Resume = true
+	resumed, err := Prefetch(context.Background(), config)
+	if err != nil || resumed.ID != prepared.ID || resumed.ModuleCache != prepared.ModuleCache {
+		t.Fatalf("matching context was not resumed: %+v err=%v", resumed, err)
+	}
+	data, err := os.ReadFile(sentinel)
+	if err != nil || string(data) != "retained" {
+		t.Fatalf("resumption discarded the existing cache: %v", err)
+	}
+	if err := os.WriteFile(prepared.ModuleFile, []byte("module changed\n\ngo 1.27.1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Prefetch(context.Background(), config); err == nil {
+		t.Fatal("resumed a changed module input")
+	}
+}
+
+func TestPrefetchResumeFailurePreservesContext(t *testing.T) {
+	config := prefetchFixture(t)
+	prepared, err := Prefetch(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moduleInput := []byte("module fixture\n\ngo 1.27.1\n\nrequire example.org/unavailable v1.0.0\n")
+	if err := os.WriteFile(filepath.Join(config.Directory, "go.mod"), moduleInput, 0600); err != nil {
+		t.Fatal(err)
+	}
+	prepared.SourceModHash = hexHash(moduleInput)
+	contextRoot := filepath.Join(config.Sandbox, ".dependencies", dependencyID(prepared))
+	if err := os.Rename(filepath.Dir(prepared.ModuleFile), contextRoot); err != nil {
+		t.Fatal(err)
+	}
+	moduleFile := filepath.Join(contextRoot, "analysis.mod")
+	sumFile := filepath.Join(contextRoot, "analysis.sum")
+	sentinel := filepath.Join(contextRoot, "module-cache", "retained-cache")
+	for path, data := range map[string][]byte{
+		moduleFile: moduleInput,
+		sumFile:    []byte("retained checksum input\n"),
+		sentinel:   []byte("retained"),
+	} {
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config.Resume = true
+	if _, err := Prefetch(context.Background(), config); err == nil {
+		t.Fatal("unavailable dependency unexpectedly prepared")
+	}
+	for path, expected := range map[string]string{
+		moduleFile: string(moduleInput),
+		sumFile:    "retained checksum input\n",
+		sentinel:   "retained",
+	} {
+		actual, err := os.ReadFile(path)
+		if err != nil || string(actual) != expected {
+			t.Fatalf("failed resumption changed %s: %q err=%v", path, actual, err)
+		}
+	}
+}
+
+func TestPrefetchResumeSeparatesHardlinkedInput(t *testing.T) {
+	config := prefetchFixture(t)
+	prepared, err := Prefetch(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(config.Directory, "go.mod")
+	if err := os.Remove(prepared.ModuleFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(source, prepared.ModuleFile); err != nil {
+		t.Skipf("hard-link creation unavailable: %v", err)
+	}
+	before, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Resume = true
+	if _, err := Prefetch(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternate, err := os.Stat(prepared.ModuleFile)
+	if err != nil || !os.SameFile(before, after) || os.SameFile(after, alternate) {
+		t.Fatalf("resumption retained a source alias: err=%v", err)
+	}
+}
+
+func TestPrefetchResumeRejectsRedirectedCache(t *testing.T) {
+	config := prefetchFixture(t)
+	prepared, err := Prefetch(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(prepared.ModuleCache, prepared.ModuleCache+"-retained"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(config.Protected[0], prepared.ModuleCache); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	config.Resume = true
+	if _, err := Prefetch(context.Background(), config); err == nil {
+		t.Fatal("resumed a redirected module cache")
+	}
+	entries, err := os.ReadDir(config.Protected[0])
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("resumption wrote into the protected tree: %v err=%v", entries, err)
+	}
+}
+
 func TestPrefetchRejectsRedirectedContext(t *testing.T) {
 	config := prefetchFixture(t)
 	protected := config.Protected[0]

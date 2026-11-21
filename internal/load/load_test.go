@@ -174,10 +174,11 @@ func TestPrefetchPreservesSources(t *testing.T) {
 	ambientModule, ambientBuild := t.TempDir(), t.TempDir()
 	t.Setenv("GOMODCACHE", ambientModule)
 	t.Setenv("GOCACHE", ambientBuild)
-	prepared, err := corpus.Prefetch(context.Background(), corpus.PrefetchConfig{
+	prefetchConfig := corpus.PrefetchConfig{
 		Directory: directory, Sandbox: sandbox, Protected: []string{t.TempDir()},
 		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Proxy: proxyURL, SumDB: "off",
-	})
+	}
+	prepared, err := corpus.Prefetch(context.Background(), prefetchConfig)
 	if err != nil || prepared.ID == "" || prepared.ModuleFile == "" || prepared.GoVersion == "" {
 		t.Fatalf("prepared dependency context: %+v err=%v", prepared, err)
 	}
@@ -185,6 +186,15 @@ func TestPrefetchPreservesSources(t *testing.T) {
 	if err := os.Rename(proxy, proxy+"-unavailable"); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(proxy, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prefetchConfig.Resume = true
+	resumed, err := corpus.Prefetch(context.Background(), prefetchConfig)
+	if err != nil || resumed.ID != prepared.ID || resumed.ModuleCache != prepared.ModuleCache {
+		t.Fatalf("cached context failed to resume without proxy contents: %+v err=%v", resumed, err)
+	}
+	prepared = resumed
 	config := Config{
 		Directory: directory, Patterns: []string{"./..."}, GOOS: prepared.GOOS, GOARCH: prepared.GOARCH,
 		ModuleCache: prepared.ModuleCache, BuildCache: prepared.BuildCache, ModuleFile: prepared.ModuleFile,

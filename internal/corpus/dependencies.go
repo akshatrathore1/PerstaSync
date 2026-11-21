@@ -27,6 +27,7 @@ type PrefetchConfig struct {
 	GOARCH    string
 	Proxy     string
 	SumDB     string
+	Resume    bool
 }
 
 type Dependencies struct {
@@ -244,16 +245,50 @@ func Prefetch(ctx context.Context, config PrefetchConfig) (dependencies Dependen
 	}
 	id := dependencyID(identityInput)
 	preparedRoot := filepath.Join(inputsRoot, id)
+	resuming := false
 	if _, err := os.Lstat(preparedRoot); err == nil {
-		return Dependencies{}, fmt.Errorf("dependency context already exists")
+		if !config.Resume {
+			return Dependencies{}, fmt.Errorf("dependency context already exists")
+		}
+		if _, err := existingDirectoryWithoutLinks(preparedRoot); err != nil {
+			return Dependencies{}, err
+		}
+		resuming = true
 	} else if !os.IsNotExist(err) {
 		return Dependencies{}, fmt.Errorf("inspect dependency context: %w", err)
 	}
-	if err := os.MkdirAll(preparedRoot, 0700); err != nil {
-		return Dependencies{}, fmt.Errorf("create dependency context: %w", err)
+	if config.Resume && !resuming {
+		return Dependencies{}, fmt.Errorf("dependency resumption requires an existing matching context")
+	}
+	if !resuming {
+		if err := os.MkdirAll(preparedRoot, 0700); err != nil {
+			return Dependencies{}, fmt.Errorf("create dependency context: %w", err)
+		}
+	}
+	moduleFile := filepath.Join(preparedRoot, "analysis.mod")
+	sumFile := strings.TrimSuffix(moduleFile, ".mod") + ".sum"
+	var previousSum []byte
+	if resuming {
+		preparedModule, err := regularFile(moduleFile, true)
+		if err != nil || hexHash(preparedModule) != hexHash(moduleInput) {
+			return Dependencies{}, fmt.Errorf("existing module input differs from the pinned source")
+		}
+		previousSum, err = regularFile(sumFile, false)
+		if err != nil {
+			return Dependencies{}, err
+		}
 	}
 	defer func() {
 		if resultErr != nil {
+			if resuming {
+				resultErr = errors.Join(resultErr, writeDependencyInput(moduleFile, moduleInput))
+				if previousSum != nil {
+					resultErr = errors.Join(resultErr, writeDependencyInput(sumFile, previousSum))
+				} else if err := os.Remove(sumFile); err != nil && !os.IsNotExist(err) {
+					resultErr = errors.Join(resultErr, err)
+				}
+				return
+			}
 			cache := filepath.Join(preparedRoot, "module-cache")
 			if _, err := os.Stat(cache); err == nil {
 				cleanupConfig := config
@@ -269,13 +304,15 @@ func Prefetch(ctx context.Context, config PrefetchConfig) (dependencies Dependen
 			_ = os.Remove(filepath.Dir(preparedRoot))
 		}
 	}()
-	moduleFile := filepath.Join(preparedRoot, "analysis.mod")
-	if err := os.WriteFile(moduleFile, moduleInput, 0600); err != nil {
+	if err := writeDependencyInput(moduleFile, moduleInput); err != nil {
 		return Dependencies{}, err
 	}
-	sumFile := strings.TrimSuffix(moduleFile, ".mod") + ".sum"
 	if len(sumInput) != 0 {
-		if err := os.WriteFile(sumFile, sumInput, 0600); err != nil {
+		if err := writeDependencyInput(sumFile, sumInput); err != nil {
+			return Dependencies{}, err
+		}
+	} else if resuming {
+		if err := os.Remove(sumFile); err != nil && !os.IsNotExist(err) {
 			return Dependencies{}, err
 		}
 	}
@@ -283,12 +320,25 @@ func Prefetch(ctx context.Context, config PrefetchConfig) (dependencies Dependen
 	buildCache := filepath.Join(preparedRoot, "build-cache")
 	control := filepath.Join(preparedRoot, "control")
 	for _, path := range []string{moduleCache, buildCache, control} {
-		if err := os.Mkdir(path, 0700); err != nil {
-			return Dependencies{}, err
+		if resuming {
+			if _, err := existingDirectoryWithoutLinks(path); err != nil {
+				return Dependencies{}, err
+			}
+		} else {
+			if err := os.Mkdir(path, 0700); err != nil {
+				return Dependencies{}, err
+			}
 		}
 	}
-	if err := os.WriteFile(filepath.Join(control, "empty-netrc"), nil, 0600); err != nil {
-		return Dependencies{}, err
+	if resuming {
+		credentials, err := regularFile(filepath.Join(control, "empty-netrc"), true)
+		if err != nil || len(credentials) != 0 {
+			return Dependencies{}, fmt.Errorf("existing dependency controls are invalid")
+		}
+	} else {
+		if err := os.WriteFile(filepath.Join(control, "empty-netrc"), nil, 0600); err != nil {
+			return Dependencies{}, err
+		}
 	}
 	goEnv := isolatedGoEnvironment(config, moduleCache, buildCache, control)
 	if output, err := runGo(ctx, goExecutable, directory, goEnv, "mod", "download", "-modfile="+moduleFile, "all"); err != nil {
@@ -320,6 +370,26 @@ func Prefetch(ctx context.Context, config PrefetchConfig) (dependencies Dependen
 		ModuleHash: hexHash(preparedModule), SumHash: hexHash(preparedSum),
 		ModuleFile: moduleFile, ModuleCache: moduleCache, BuildCache: buildCache,
 	}, nil
+}
+
+func writeDependencyInput(path string, data []byte) (resultErr error) {
+	input, err := os.CreateTemp(filepath.Dir(path), ".input-")
+	if err != nil {
+		return err
+	}
+	name := input.Name()
+	defer func() {
+		if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	if _, err := input.Write(data); err != nil {
+		return errors.Join(err, input.Close())
+	}
+	if err := input.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 func dependencyID(dependencies Dependencies) string {

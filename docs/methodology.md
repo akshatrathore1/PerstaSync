@@ -24,6 +24,11 @@ defaults. Cache configuration is distinct from dependency prefetch and does not 
 `prefetch` requires a materialized root within the sandbox, protected source roots, target platform,
 a single module proxy and explicit checksum policy. It prepares alternate module/checksum inputs
 without editing the checkout and emits their context metadata without local absolute paths.
+`prefetch -resume` explicitly reuses an existing context with the same source inputs, target,
+toolchain and proxy policy. It validates the alternate module input and existing cache/control
+paths, initializes checksums from the pinned source, and retains cached modules for normal download
+and integrity verification. Failed resumption restores the prior alternate inputs and retains the
+cache. Ordinary prefetch still rejects existing contexts rather than overwriting them.
 Classification may use `-dependency-context` with the same sandbox/protection configuration instead
 of direct cache flags. The corpus package strictly decodes that context, reconstructs local paths,
 verifies identity and source/prepared hashes, and checks the current Go version before loading.

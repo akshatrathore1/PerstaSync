@@ -176,6 +176,7 @@ func runPrefetch(ctx context.Context, arguments []string, output, diagnostics io
 	goarch := flags.String("goarch", "", "Target architecture")
 	proxy := flags.String("proxy", "", "Single module proxy URL")
 	sumdb := flags.String("sumdb", "", "Checksum database policy")
+	resume := flags.Bool("resume", false, "Resume an existing matching dependency context")
 	if err := flags.Parse(arguments); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -191,7 +192,7 @@ func runPrefetch(ctx context.Context, arguments []string, output, diagnostics io
 	}
 	dependencies, err := prefetchCorpusDependencies(ctx, corpus.PrefetchConfig{
 		Directory: directory, Sandbox: *sandbox, Protected: filepath.SplitList(*protected),
-		GOOS: *goos, GOARCH: *goarch, Proxy: *proxy, SumDB: *sumdb,
+		GOOS: *goos, GOARCH: *goarch, Proxy: *proxy, SumDB: *sumdb, Resume: *resume,
 	})
 	if err != nil {
 		return err

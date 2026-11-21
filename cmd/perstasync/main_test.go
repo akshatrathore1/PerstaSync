@@ -313,8 +313,9 @@ func TestCLIPrefetchWiring(t *testing.T) {
 	}
 	original := prefetchCorpusDependencies
 	t.Cleanup(func() { prefetchCorpusDependencies = original })
+	expectResume := false
 	prefetchCorpusDependencies = func(_ context.Context, config corpus.PrefetchConfig) (corpus.Dependencies, error) {
-		if config.Directory != source || config.Sandbox != root || !reflect.DeepEqual(config.Protected, protected) || config.GOOS != "linux" || config.GOARCH != "amd64" || config.Proxy != "https://proxy.example" || config.SumDB != "sum.golang.org" {
+		if config.Directory != source || config.Sandbox != root || !reflect.DeepEqual(config.Protected, protected) || config.GOOS != "linux" || config.GOARCH != "amd64" || config.Proxy != "https://proxy.example" || config.SumDB != "sum.golang.org" || config.Resume != expectResume {
 			t.Fatalf("prefetch wiring: %+v", config)
 		}
 		return prepared, nil
@@ -328,6 +329,11 @@ func TestCLIPrefetchWiring(t *testing.T) {
 	var decoded corpus.Dependencies
 	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil || decoded.ID != prepared.ID || decoded.ModuleFile != "" || decoded.ModuleCache != "" || decoded.BuildCache != "" {
 		t.Fatalf("prefetch output: %+v err=%v", decoded, err)
+	}
+	output.Reset()
+	expectResume = true
+	if err := run(context.Background(), append(arguments, "-resume"), &output, &diagnostics); err != nil {
+		t.Fatal(err)
 	}
 	output.Reset()
 	if err := run(context.Background(), []string{"prefetch", "-root", source}, &output, &diagnostics); err == nil || output.Len() != 0 {
