@@ -8,8 +8,10 @@ not a completed ecosystem study. There is no published corpus distribution or me
 
 The CLI requires a source root, package patterns, and explicit target `GOOS` and `GOARCH`.
 It uses `golang.org/x/tools v0.52.0`; transitive dependencies and checksums are recorded in
-the module files. Go 1.27.1 is the configured toolchain. Dependency acquisition is separate from
-source analysis; the loader disables proxy acquisition and automatic toolchain switching.
+the module files. The module minimum remains Go 1.27.1; the recorded measurement/development
+toolchain is Go 1.27.4. Dependency acquisition is separate from source analysis; the loader
+disables proxy acquisition and automatic toolchain switching. Corpus contexts record the exact
+platform executable and cannot silently select a different toolchain.
 This is not an operating-system network sandbox: the source tree, local module replacements,
 and Go configuration must be controlled inputs.
 
