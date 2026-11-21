@@ -17,6 +17,7 @@ import (
 	"golang.org/x/tools/go/packages"
 
 	"perstasync/internal/corpus"
+	"perstasync/internal/load"
 	"perstasync/internal/protocol"
 )
 
@@ -372,14 +373,14 @@ func TestCLIDependencyContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	protected := strings.Join([]string{t.TempDir(), t.TempDir()}, string(os.PathListSeparator))
-	arguments := []string{"-root", source, "-goos", runtime.GOOS, "-goarch", runtime.GOARCH, "-dependency-context", contextFile, "-sandbox", root, "-protected", protected, "./..."}
+	arguments := []string{"-root", source, "-goos", runtime.GOOS, "-goarch", runtime.GOARCH, "-dependency-context", contextFile, "-sandbox", root, "-protected", protected, "-load-only", "./..."}
 	var output, diagnostics bytes.Buffer
 	if err := run(context.Background(), arguments, &output, &diagnostics); err != nil {
 		t.Fatal(err)
 	}
-	var sites []protocol.Site
-	if err := json.Unmarshal(output.Bytes(), &sites); err != nil || len(sites) != 1 {
-		t.Fatalf("context classification: %+v err=%v", sites, err)
+	var summary load.Summary
+	if err := json.Unmarshal(output.Bytes(), &summary); err != nil || summary.PackageCount == 0 || !reflect.DeepEqual(summary.InitialPackages, []string{"fixture"}) {
+		t.Fatalf("context load summary: %+v err=%v", summary, err)
 	}
 	output.Reset()
 	arguments[3] = "plan9"

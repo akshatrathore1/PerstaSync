@@ -26,6 +26,9 @@ Classification may use `-dependency-context` with the same sandbox/protection co
 of direct cache flags. The corpus package strictly decodes that context, reconstructs local paths,
 verifies identity and source/prepared hashes, and checks the current Go version before loading.
 The requested platform must match; invalid contexts produce no classification document.
+`-load-only` stops after packages/SSA/call-graph construction and emits only deterministic package
+accounting. It does not invoke protocol classification. This diagnostic is used to qualify prepared
+inputs before a pilot run; a successful load is not a conformance or accuracy result.
 
 The same CLI provides `pin` and `materialize` acquisition subcommands. Both require an explicit
 sandbox and an OS path list of protected source roots. `pin` records the repository URL, symbolic

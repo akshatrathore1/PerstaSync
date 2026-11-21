@@ -28,6 +28,13 @@ func TestOpen(t *testing.T) {
 	if program.SSA == nil || program.CallGraph == nil || len(program.Initial) != 1 {
 		t.Fatalf("incomplete loaded program: %+v", program)
 	}
+	summary, err := Summarize(program)
+	if err != nil || summary.PackageCount == 0 || len(summary.InitialPackages) != 1 || summary.InitialPackages[0] != "perstasync/testdata/fixtures/loader" {
+		t.Fatalf("load summary: %+v err=%v", summary, err)
+	}
+	if _, err := Summarize(nil); err == nil {
+		t.Fatal("summarized a missing program")
+	}
 	function := program.Initial[0].Func("Publish")
 	if function == nil || len(function.Blocks) == 0 {
 		t.Fatal("fixture function has no SSA body")

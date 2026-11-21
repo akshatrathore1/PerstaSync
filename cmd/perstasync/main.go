@@ -47,6 +47,7 @@ func runClassify(ctx context.Context, arguments []string, output, diagnostics io
 	dependencyContext := flags.String("dependency-context", "", "Prepared dependency context JSON")
 	sandbox := flags.String("sandbox", "", "Corpus sandbox root")
 	protected := flags.String("protected", "", "Protected source roots as an OS path list")
+	loadOnly := flags.Bool("load-only", false, "Load packages without protocol classification")
 	disableOpenFlags := flags.Bool("disable-open-flags", false, "Disable synchronous-write flag coverage")
 	disableInterprocedural := flags.Bool("disable-interprocedural", false, "Disable callee argument and result tracking")
 	disableStructFields := flags.Bool("disable-struct-fields", false, "Disable struct-field handle and path tracking")
@@ -93,6 +94,13 @@ func runClassify(ctx context.Context, arguments []string, output, diagnostics io
 	})
 	if err != nil {
 		return err
+	}
+	if *loadOnly {
+		summary, err := load.Summarize(program)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(output).Encode(summary)
 	}
 	sites, err := protocol.AnalyzeWithOptions(program.SSA, program.Initial, directory, protocol.Options{
 		GOOS: program.Config.GOOS, DisableOpenFlags: *disableOpenFlags,

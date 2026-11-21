@@ -35,6 +35,26 @@ type Program struct {
 	Config    Config
 }
 
+type Summary struct {
+	PackageCount    int      `json:"package_count"`
+	InitialPackages []string `json:"initial_packages"`
+}
+
+func Summarize(program *Program) (Summary, error) {
+	if program == nil || len(program.Initial) == 0 {
+		return Summary{}, errors.New("load summary requires selected packages")
+	}
+	initial := make([]string, 0, len(program.Initial))
+	for _, pkg := range program.Initial {
+		if pkg == nil || pkg.Pkg == nil {
+			return Summary{}, errors.New("load summary contains an unavailable package")
+		}
+		initial = append(initial, pkg.Pkg.Path())
+	}
+	sort.Strings(initial)
+	return Summary{PackageCount: len(program.Packages), InitialPackages: initial}, nil
+}
+
 func Open(ctx context.Context, config Config) (*Program, error) {
 	if config.Directory == "" || len(config.Patterns) == 0 || config.GOOS == "" || config.GOARCH == "" {
 		return nil, errors.New("loading requires a directory, explicit package patterns, GOOS, and GOARCH")
