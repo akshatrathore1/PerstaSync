@@ -2,6 +2,9 @@ package protocol
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -10,6 +13,22 @@ import (
 
 	"perstasync/internal/load"
 )
+
+func TestAppendReasonPreservesUniqueEvidence(t *testing.T) {
+	for _, test := range []struct {
+		first, second, expected string
+	}{
+		{"", "", ""},
+		{"", "path; sync; path", "path; sync"},
+		{"path; sync", "sync; interface", "path; sync; interface"},
+		{"path; sync; path", "", "path; sync"},
+		{"interface; path", "path; interface; external", "interface; path; external"},
+	} {
+		if actual := appendReason(test.first, test.second); actual != test.expected {
+			t.Errorf("reason merge got %q, want %q", actual, test.expected)
+		}
+	}
+}
 
 func TestSourceDirect(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
@@ -61,6 +80,72 @@ func sourceFixture(t *testing.T, fixture string) (*load.Program, string) {
 		t.Fatal(err)
 	}
 	return program, root
+}
+
+func TestSourceFanoutBound(t *testing.T) {
+	program, root := sourceFixture(t, "fanout")
+	stats := &analysisStats{}
+	sites, err := AnalyzeWithOptions(program.SSA, program.Initial, root, Options{GOOS: program.Config.GOOS, MaxFunctionContexts: 64, stats: stats})
+	if err == nil || !strings.Contains(err.Error(), "bounded context limit") || len(sites) != 0 {
+		t.Fatalf("bounded fanout emitted a partial classification: %+v err=%v", sites, err)
+	}
+	if stats.invocations > 1000 {
+		t.Fatalf("bounded fanout used %d invocations", stats.invocations)
+	}
+}
+
+type cancellationContext struct {
+	context.Context
+	stats      *analysisStats
+	cancel     context.CancelFunc
+	afterCalls int
+}
+
+func (control *cancellationContext) Err() error {
+	if control.stats.invocations >= control.afterCalls {
+		control.cancel()
+	}
+	return control.Context.Err()
+}
+
+func TestSourceCancellation(t *testing.T) {
+	program, root := sourceFixture(t, "fanout")
+	for _, afterCalls := range []int{0, 32} {
+		stats := &analysisStats{}
+		parent, cancel := context.WithCancel(context.Background())
+		control := &cancellationContext{Context: parent, stats: stats, cancel: cancel, afterCalls: afterCalls}
+		sites, err := AnalyzeWithOptions(program.SSA, program.Initial, root, Options{GOOS: "linux", Context: control, stats: stats})
+		cancel()
+		if !errors.Is(err, context.Canceled) || sites != nil || stats.invocations != afterCalls {
+			t.Fatalf("cancellation after %d calls: sites=%+v calls=%d err=%v", afterCalls, sites, stats.invocations, err)
+		}
+	}
+}
+
+func TestSourceIgnoresPublicationFreeFanout(t *testing.T) {
+	root := t.TempDir()
+	var source strings.Builder
+	source.WriteString("package fixture\nfunc level00() {}\n")
+	for depth := 1; depth <= 24; depth++ {
+		fmt.Fprintf(&source, "func level%02d() { level%02d(); level%02d() }\n", depth, depth-1, depth-1)
+	}
+	for name, data := range map[string]string{
+		"go.mod":     "module fixture\n\ngo 1.27.1\n",
+		"fixture.go": source.String(),
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	program, err := load.Open(context.Background(), load.Config{Directory: root, Patterns: []string{"./..."}, GOOS: "linux", GOARCH: "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := &analysisStats{}
+	sites, err := AnalyzeWithOptions(program.SSA, program.Initial, root, Options{GOOS: "linux", stats: stats})
+	if err != nil || len(sites) != 0 || stats.invocations != 0 {
+		t.Fatalf("publication-free call tree was interpreted: sites=%+v calls=%d err=%v", sites, stats.invocations, err)
+	}
 }
 
 func TestSourceCallees(t *testing.T) {

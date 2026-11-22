@@ -1,12 +1,16 @@
 package protocol
 
 import (
+	"context"
 	"fmt"
 	"go/constant"
 	"go/token"
 	"go/types"
+	"log"
+	"os"
 	"path"
 	"path/filepath"
+	"runtime/pprof"
 	"sort"
 	"strings"
 
@@ -27,6 +31,15 @@ type Options struct {
 	DisableStructFields    bool
 	DisableAllocCells      bool
 	DisablePaths           bool
+	MaxFunctionContexts    int
+	Context                context.Context
+	Diagnostics            *log.Logger
+	CPUProfile             string
+	stats                  *analysisStats
+}
+
+type analysisStats struct {
+	invocations int
 }
 
 type writeMode uint8
@@ -144,6 +157,7 @@ type execution struct {
 	selected     map[*ssa.Function]bool
 	visited      map[*ssa.Function]bool
 	active       map[*ssa.Function]bool
+	invocations  map[*ssa.Function]int
 	files        map[*pathValue]*fileState
 	literals     map[string]*pathValue
 	publications []publication
@@ -160,12 +174,32 @@ func AnalyzeWithOptions(program *ssa.Program, initial []*ssa.Package, root strin
 	if program == nil || len(initial) == 0 || root == "" {
 		return nil, fmt.Errorf("analysis requires a built program, selected packages, and root")
 	}
+	if options.Context != nil && options.Context.Err() != nil {
+		return nil, options.Context.Err()
+	}
+	if options.CPUProfile != "" {
+		profile, err := os.OpenFile(options.CPUProfile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			return nil, err
+		}
+		defer profile.Close()
+		if err := pprof.StartCPUProfile(profile); err != nil {
+			return nil, err
+		}
+		defer pprof.StopCPUProfile()
+	}
+	if options.Diagnostics != nil {
+		options.Diagnostics.Print("classifier function enumeration started")
+	}
 	selected := make(map[*ssa.Package]bool)
 	for _, pkg := range initial {
 		selected[pkg] = true
 	}
 	functions := make([]*ssa.Function, 0)
 	for function := range ssautil.AllFunctions(program) {
+		if options.Context != nil && options.Context.Err() != nil {
+			return nil, options.Context.Err()
+		}
 		if selected[function.Pkg] && len(function.Blocks) != 0 {
 			functions = append(functions, function)
 		}
@@ -178,31 +212,60 @@ func AnalyzeWithOptions(program *ssa.Program, initial []*ssa.Package, root strin
 	})
 	selectedFunctions := make(map[*ssa.Function]bool)
 	called := make(map[*ssa.Function]bool)
+	callers := make(map[*ssa.Function][]*ssa.Function)
+	relevant := make(map[*ssa.Function]bool)
+	pending := make([]*ssa.Function, 0)
 	for _, function := range functions {
 		selectedFunctions[function] = true
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
 				if call, ok := instruction.(ssa.CallInstruction); ok {
-					called[call.Common().StaticCallee()] = true
+					callee := call.Common().StaticCallee()
+					called[callee] = true
+					if callee != nil {
+						callers[callee] = append(callers[callee], function)
+						if exactFunction(callee, "os", "Rename") && len(call.Common().Args) == 2 && !relevant[function] {
+							relevant[function] = true
+							pending = append(pending, function)
+						}
+					}
 				}
 				if closure, ok := instruction.(*ssa.MakeClosure); ok {
 					if target, ok := closure.Fn.(*ssa.Function); ok {
 						called[target] = true
+						callers[target] = append(callers[target], function)
 					}
 				}
 			}
 		}
 	}
+	for len(pending) != 0 {
+		last := len(pending) - 1
+		callee := pending[last]
+		pending = pending[:last]
+		for _, caller := range callers[callee] {
+			if !relevant[caller] {
+				relevant[caller] = true
+				pending = append(pending, caller)
+			}
+		}
+	}
 	visited := make(map[*ssa.Function]bool)
 	publications := make([]publication, 0)
+	if options.Diagnostics != nil {
+		options.Diagnostics.Printf("classifier roots started: selected_functions=%d publication_reachable=%d", len(functions), len(relevant))
+	}
 	for _, fallback := range []bool{false, true} {
 		for _, function := range functions {
-			if (!fallback && called[function]) || (fallback && visited[function]) {
+			if !relevant[function] || (!fallback && called[function]) || (fallback && visited[function]) {
 				continue
+			}
+			if options.Diagnostics != nil {
+				options.Diagnostics.Printf("classifier root started: %s", function.String())
 			}
 			run := &execution{
 				program: program, root: root, options: options, selected: selectedFunctions,
-				visited: visited, active: make(map[*ssa.Function]bool), files: make(map[*pathValue]*fileState),
+				visited: visited, active: make(map[*ssa.Function]bool), invocations: make(map[*ssa.Function]int), files: make(map[*pathValue]*fileState),
 				literals: make(map[string]*pathValue),
 			}
 			if _, err := run.invoke(function, nil, nil, nil, nil); err != nil {
@@ -221,6 +284,9 @@ func AnalyzeWithOptions(program *ssa.Program, initial []*ssa.Package, root strin
 		}
 	}
 	sites := mergePublications(publications)
+	if options.Diagnostics != nil {
+		options.Diagnostics.Printf("classifier completed: candidates=%d", len(sites))
+	}
 	sort.Slice(sites, func(first, second int) bool {
 		if sites[first].File != sites[second].File {
 			return sites[first].File < sites[second].File
@@ -231,7 +297,17 @@ func AnalyzeWithOptions(program *ssa.Program, initial []*ssa.Package, root strin
 }
 
 func (run *execution) invoke(function *ssa.Function, arguments, bindings []trackedValue, caller *callFrame, call *ssa.Call) ([]trackedValue, error) {
+	if run.options.Context != nil && run.options.Context.Err() != nil {
+		return nil, run.options.Context.Err()
+	}
 	run.visited[function] = true
+	run.invocations[function]++
+	if run.options.stats != nil {
+		run.options.stats.invocations++
+	}
+	if run.options.MaxFunctionContexts > 0 && run.invocations[function] > run.options.MaxFunctionContexts {
+		return nil, fmt.Errorf("selected function %s exceeds the bounded context limit", function.String())
+	}
 	if run.active[function] || len(run.active) >= 32 {
 		run.unresolved = true
 		return nil, nil
@@ -261,6 +337,9 @@ func (run *execution) invoke(function *ssa.Function, arguments, bindings []track
 			continue
 		}
 		for _, instruction := range block.Instrs {
+			if run.options.Context != nil && run.options.Context.Err() != nil {
+				return nil, run.options.Context.Err()
+			}
 			switch instruction := instruction.(type) {
 			case *ssa.Alloc:
 				if pointer, ok := instruction.Type().Underlying().(*types.Pointer); ok {
@@ -581,13 +660,17 @@ func mergeCoverage(first, second Coverage) Coverage {
 }
 
 func appendReason(first, second string) string {
-	if first == "" {
-		return second
+	seen := make(map[string]bool)
+	reasons := make([]string, 0)
+	for _, combined := range []string{first, second} {
+		for _, reason := range strings.Split(combined, "; ") {
+			if reason != "" && !seen[reason] {
+				seen[reason] = true
+				reasons = append(reasons, reason)
+			}
+		}
 	}
-	if second == "" || first == second {
-		return first
-	}
-	return first + "; " + second
+	return strings.Join(reasons, "; ")
 }
 
 func openWriteMode(program *ssa.Program, value ssa.Value, options Options) writeMode {

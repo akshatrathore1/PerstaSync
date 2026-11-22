@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -48,6 +49,9 @@ func runClassify(ctx context.Context, arguments []string, output, diagnostics io
 	sandbox := flags.String("sandbox", "", "Corpus sandbox root")
 	protected := flags.String("protected", "", "Protected source roots as an OS path list")
 	loadOnly := flags.Bool("load-only", false, "Load packages without protocol classification")
+	progress := flags.Bool("progress", false, "Emit timestamped phase diagnostics")
+	timeout := flags.Duration("timeout", 0, "Maximum analysis duration")
+	cpuProfile := flags.String("cpu-profile", "", "Classifier CPU profile output")
 	disableOpenFlags := flags.Bool("disable-open-flags", false, "Disable synchronous-write flag coverage")
 	disableInterprocedural := flags.Bool("disable-interprocedural", false, "Disable callee argument and result tracking")
 	disableStructFields := flags.Bool("disable-struct-fields", false, "Disable struct-field handle and path tracking")
@@ -61,6 +65,19 @@ func runClassify(ctx context.Context, arguments []string, output, diagnostics io
 	}
 	if *root == "" {
 		return fmt.Errorf("-root is required")
+	}
+	if *timeout < 0 {
+		return fmt.Errorf("-timeout must not be negative")
+	}
+	if *timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		defer cancel()
+	}
+	var phaseLogger *log.Logger
+	if *progress {
+		phaseLogger = log.New(diagnostics, "[phase] ", log.LstdFlags|log.LUTC)
+		phaseLogger.Print("input context validation started")
 	}
 	directory, err := filepath.Abs(*root)
 	if err != nil {
@@ -91,6 +108,7 @@ func runClassify(ctx context.Context, arguments []string, output, diagnostics io
 	program, err := load.Open(ctx, load.Config{
 		Directory: directory, Patterns: flags.Args(), GOOS: *goos, GOARCH: *goarch,
 		ModuleCache: *moduleCache, BuildCache: *buildCache, ModuleFile: moduleFile,
+		Diagnostics: phaseLogger,
 	})
 	if err != nil {
 		return err
@@ -108,6 +126,9 @@ func runClassify(ctx context.Context, arguments []string, output, diagnostics io
 		DisableStructFields:    *disableStructFields,
 		DisableAllocCells:      *disableAllocCells,
 		DisablePaths:           *disablePaths,
+		Context:                ctx,
+		Diagnostics:            phaseLogger,
+		CPUProfile:             *cpuProfile,
 	})
 	if err != nil {
 		return err

@@ -395,6 +395,59 @@ func TestCLIDependencyContext(t *testing.T) {
 	}
 }
 
+func TestCLIPhaseDiagnosticsPreserveJSON(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := []string{"-root", root, "-goos", "linux", "-goarch", "amd64", "./testdata/fixtures/direct"}
+	var baseline, traced, diagnostics bytes.Buffer
+	if err := run(context.Background(), arguments, &baseline, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Join(t.TempDir(), "classifier.pprof")
+	tracedArguments := append([]string{"-progress", "-timeout", "30s", "-cpu-profile", profile}, arguments...)
+	if err := run(context.Background(), tracedArguments, &traced, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(baseline.Bytes(), traced.Bytes()) || !strings.Contains(diagnostics.String(), "package loading started") || !strings.Contains(diagnostics.String(), "classifier completed") {
+		t.Fatalf("phase diagnostics changed results or omitted phases: %s", diagnostics.String())
+	}
+	if info, err := os.Stat(profile); err != nil || info.Size() == 0 {
+		t.Fatalf("classifier profile unavailable: %v", err)
+	}
+	profileBytes, err := os.ReadFile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traced.Reset()
+	if err := run(context.Background(), tracedArguments, &traced, &diagnostics); err == nil || traced.Len() != 0 {
+		t.Fatalf("existing profile emitted a classification: output=%q err=%v", traced.String(), err)
+	}
+	preserved, err := os.ReadFile(profile)
+	if err != nil || !bytes.Equal(profileBytes, preserved) {
+		t.Fatalf("existing profile was changed: %v", err)
+	}
+}
+
+func TestCLICancellationEmitsNoJSON(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	arguments := []string{"-root", root, "-goos", "linux", "-goarch", "amd64", "./testdata/fixtures/direct"}
+	var output, diagnostics bytes.Buffer
+	if err := run(parent, arguments, &output, &diagnostics); err == nil || output.Len() != 0 {
+		t.Fatalf("cancelled request emitted output=%q err=%v", output.String(), err)
+	}
+	arguments = append([]string{"-timeout", "-1s"}, arguments...)
+	if err := run(context.Background(), arguments, &output, &diagnostics); err == nil || output.Len() != 0 {
+		t.Fatalf("negative deadline emitted output=%q err=%v", output.String(), err)
+	}
+}
+
 func TestPackageBoundaries(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -408,7 +461,7 @@ func TestPackageBoundaries(t *testing.T) {
 		t.Fatal("architecture check loaded no packages")
 	}
 	commandImports := map[string]bool{
-		"bytes": true, "context": true, "encoding/json": true, "errors": true, "flag": true, "fmt": true, "io": true, "os": true, "path/filepath": true,
+		"bytes": true, "context": true, "encoding/json": true, "errors": true, "flag": true, "fmt": true, "io": true, "log": true, "os": true, "path/filepath": true,
 		"perstasync/internal/corpus": true,
 		"perstasync/internal/load":   true, "perstasync/internal/protocol": true, "perstasync/internal/report": true,
 	}

@@ -37,6 +37,13 @@ The requested platform must match; invalid contexts produce no classification do
 accounting. It does not invoke protocol classification. This diagnostic is used to qualify prepared
 inputs before a pilot run; a successful load is not a conformance or accuracy result.
 
+`-progress` reports loading, SSA, call-graph and classifier phases to standard error without
+changing result JSON. `-timeout` supplies a cooperative deadline to input validation, loading and
+classifier traversal. SSA construction and function enumeration are not preemptible at every point;
+the deadline is not an operating-system process or memory limit. `-cpu-profile` writes a new CPU
+profile for the classifier phase only, after loading and SSA construction. Existing profile files
+are rejected rather than overwritten. Cancellation or classifier failure emits no partial result.
+
 The same CLI provides `pin` and `materialize` acquisition subcommands. Both require an explicit
 sandbox and an OS path list of protected source roots. `pin` records the repository URL, symbolic
 default branch, full commit, observation time and Git version. The sandbox must already exist.
@@ -70,9 +77,11 @@ operations. Ordered call frames propagate handles, literal paths and returned va
 statically identified callees in the selected packages. File synchronization and later mutations
 affect the same tracked object across calls; a directory sync must follow the publication it covers.
 Repeated observations of one publish coordinate merge conservatively: conflicting coverage is
-unresolved, and observed unchecked errors are retained. Candidates in unvisited bodies are still
-examined without caller evidence. The result is scoped to the selected source and observed call
-contexts, not every possible external caller.
+unresolved, and observed unchecked errors are retained. Independent roots are restricted to selected
+bodies that contain a direct publication or reach one through static calls or closure creation.
+Helpers within those roots still execute normally, retaining file, metadata and error effects.
+Unvisited publication-reachable bodies are still examined without caller evidence. The result is
+scoped to the selected source and observed call contexts, not every possible external caller.
 
 Linux path tracking recognizes literals, `filepath.Dir`, `os.CreateTemp` parent identity and
 the tracked descriptor's `Name()`. Creating the temporary file in `filepath.Dir(destination)`
@@ -93,6 +102,7 @@ Interface/type-parameter dispatch and helpers without selected bodies remain unr
 when their names suggest synchronization. Observed discarded interface sync/close errors set
 R3 without granting their effects any coverage. When both path and synchronization are unknown,
 the record retains both reasons and uses `undetermined` rather than a favorable interpretation.
+Repeated reason fragments are deduplicated in first-observed order without removing distinct evidence.
 
 For Linux inputs, constant `os.OpenFile` flags are interpreted using the loaded target's flag
 definitions. A proven non-empty `O_SYNC` write covers the preceding file state. `O_DSYNC` writes

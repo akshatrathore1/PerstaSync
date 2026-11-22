@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +26,7 @@ type Config struct {
 	ModuleCache string
 	BuildCache  string
 	ModuleFile  string
+	Diagnostics *log.Logger
 }
 
 type Program struct {
@@ -89,6 +91,9 @@ func Open(ctx context.Context, config Config) (*Program, error) {
 			config.BuildFlags = append(config.BuildFlags, "-modfile="+config.ModuleFile)
 		}
 	}
+	if config.Diagnostics != nil {
+		config.Diagnostics.Print("package loading started")
+	}
 	loaded, err := packages.Load(&packages.Config{
 		Context:    ctx,
 		Dir:        config.Directory,
@@ -98,6 +103,9 @@ func Open(ctx context.Context, config Config) (*Program, error) {
 	}, config.Patterns...)
 	if err != nil {
 		return nil, fmt.Errorf("load package graph: %w", err)
+	}
+	if config.Diagnostics != nil {
+		config.Diagnostics.Printf("package loading completed: selected=%d", len(loaded))
 	}
 	if len(loaded) == 0 {
 		return nil, errors.New("package selection matched no packages")
@@ -113,6 +121,9 @@ func Open(ctx context.Context, config Config) (*Program, error) {
 		return nil, fmt.Errorf("package graph is incomplete: %s", strings.Join(diagnostics, "; "))
 	}
 	sort.Slice(loaded, func(first, second int) bool { return loaded[first].ID < loaded[second].ID })
+	if config.Diagnostics != nil {
+		config.Diagnostics.Print("SSA construction started")
+	}
 	program, initial := ssautil.Packages(loaded, ssa.InstantiateGenerics)
 	for index, pkg := range initial {
 		if pkg == nil {
@@ -120,5 +131,12 @@ func Open(ctx context.Context, config Config) (*Program, error) {
 		}
 	}
 	program.Build()
-	return &Program{SSA: program, CallGraph: cha.CallGraph(program), Packages: loaded, Initial: initial, Config: config}, nil
+	if config.Diagnostics != nil {
+		config.Diagnostics.Print("SSA construction completed; call graph started")
+	}
+	graph := cha.CallGraph(program)
+	if config.Diagnostics != nil {
+		config.Diagnostics.Print("call graph completed")
+	}
+	return &Program{SSA: program, CallGraph: graph, Packages: loaded, Initial: initial, Config: config}, nil
 }
